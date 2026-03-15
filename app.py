@@ -16,6 +16,8 @@ def get_connection():
         server_hostname=st.secrets["DATABRICKS_HOST"],
         http_path=st.secrets["DATABRICKS_HTTP_PATH"],
         access_token=st.secrets["DATABRICKS_TOKEN"]
+        catalog="workspace",
+        schema="dbt_ysankepally_fpl_transformed"
     )
 
 @st.cache_data(ttl=3600)
