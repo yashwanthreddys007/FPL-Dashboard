@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-from databricks import sql
-import os
+import requests
+import json
 
 st.set_page_config(
     page_title="FPL Player Recommender",
@@ -9,122 +9,133 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CONNECTION ---
-@st.cache_resource
-def get_connection():
-    return sql.connect(
-        server_hostname=st.secrets["DATABRICKS_HOST"],
-        http_path=st.secrets["DATABRICKS_HTTP_PATH"],
-        access_token=st.secrets["DATABRICKS_TOKEN"],
-        catalog="workspace",
-        schema="dbt_ysankepally_fpl_transformed"
-    )
-
 @st.cache_data(ttl=3600)
 def load_recommendations():
-    conn = get_connection()
+    host = st.secrets["DATABRICKS_HOST"]
+    token = st.secrets["DATABRICKS_TOKEN"]
+    http_path = st.secrets["DATABRICKS_HTTP_PATH"]
+    
+    # Use Databricks SQL Statement API (REST, always accessible)
+    url = f"https://{host}/api/2.0/sql/statements"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Get warehouse ID from http_path
+    warehouse_id = http_path.split("/")[-1]
+    
     query = """
         SELECT
-            position_name,
-            position_rank,
-            player_name,
-            plays_for,
-            price_m,
-            fpl_form,
-            form_tier,
-            fixture_gw1,
-            fixture_gw2,
-            fixture_gw3,
-            fixture_gw4,
-            fixture_gw5,
-            gw1_num,
-            fixture_score,
-            availability_status,
-            fpl_score,
-            is_value_pick,
-            total_points,
-            goals_scored,
-            assists,
-            clean_sheets,
-            selected_by_percent
+            position_name, position_rank, player_name, plays_for,
+            price_m, fpl_form, form_tier,
+            fixture_gw1, fixture_gw2, fixture_gw3, fixture_gw4, fixture_gw5,
+            gw1_num, fixture_score, availability_status, fpl_score,
+            is_value_pick, total_points, goals_scored, assists,
+            clean_sheets, selected_by_percent
         FROM workspace.dbt_ysankepally_fpl_transformed.fpl_recommendations
         ORDER BY fpl_score DESC
     """
-    with conn.cursor() as cursor:
-        cursor.execute(query)
-        df = pd.DataFrame(
-            cursor.fetchall(),
-            columns=[d[0] for d in cursor.description]
-        )
+    
+    payload = {
+        "statement": query,
+        "warehouse_id": warehouse_id,
+        "catalog": "workspace",
+        "schema": "dbt_ysankepally_fpl_transformed",
+        "wait_timeout": "30s",
+        "disposition": "INLINE",
+        "format": "JSON_ARRAY"
+    }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    
+    if response.status_code != 200:
+        st.error(f"API error: {response.status_code} — {response.text}")
+        return pd.DataFrame()
+    
+    result = response.json()
+    
+    # Handle async — poll if still running
+    import time
+    while result.get("status", {}).get("state") in ["PENDING", "RUNNING"]:
+        time.sleep(2)
+        statement_id = result["statement_id"]
+        poll_url = f"https://{host}/api/2.0/sql/statements/{statement_id}"
+        response = requests.get(poll_url, headers=headers)
+        result = response.json()
+    
+    if result.get("status", {}).get("state") != "SUCCEEDED":
+        st.error(f"Query failed: {result}")
+        return pd.DataFrame()
+    
+    # Parse results
+    columns = [col["name"] for col in result["manifest"]["schema"]["columns"]]
+    rows = result["result"]["data_array"]
+    df = pd.DataFrame(rows, columns=columns)
+    
+    # Fix types
+    numeric_cols = ["price_m", "fpl_form", "fpl_score", "fixture_score",
+                    "total_points", "goals_scored", "assists", "clean_sheets",
+                    "selected_by_percent", "gw1_num", "position_rank"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    
     return df
 
 # --- HEADER ---
-st.title("FPL Player Recommender")
-st.markdown("AI-powered Fantasy Premier League transfer recommendations based on form, fixtures and availability.")
+st.title("⚽ FPL Player Recommender")
+st.markdown("Fantasy Premier League transfer recommendations based on form, fixtures and availability.")
 
 # --- LOAD DATA ---
-with st.spinner("Loading FPL data..."):
+with st.spinner("Loading FPL data from Databricks..."):
     df = load_recommendations()
 
-# Get current GW numbers for column labels
-gw1 = int(df["gw1_num"].dropna().iloc[0]) if not df["gw1_num"].dropna().empty else "GW"
+if df.empty:
+    st.error("Could not load data. Check logs for details.")
+    st.stop()
+
+# Get GW numbers
+gw1 = int(df["gw1_num"].dropna().iloc[0]) if not df["gw1_num"].dropna().empty else 30
 gw2, gw3, gw4, gw5 = gw1+1, gw1+2, gw1+3, gw1+4
 
 # --- SIDEBAR FILTERS ---
 st.sidebar.header("Filters")
-
-position = st.sidebar.selectbox(
-    "Position",
-    ["All", "GKP", "DEF", "MID", "FWD"]
-)
-
-max_price = st.sidebar.slider(
-    "Max price (£m)",
-    min_value=4.0,
-    max_value=15.0,
-    value=10.0,
-    step=0.5
-)
-
+position = st.sidebar.selectbox("Position", ["All", "GKP", "DEF", "MID", "FWD"])
+max_price = st.sidebar.slider("Max price (£m)", 4.0, 15.0, 10.0, 0.5)
 form_filter = st.sidebar.multiselect(
     "Form tier",
     ["elite", "good", "average", "poor"],
     default=["elite", "good"]
 )
-
 value_only = st.sidebar.checkbox("Value picks only", value=False)
 top_n = st.sidebar.slider("Show top N players", 5, 50, 15)
 
-# --- FILTER DATA ---
+# --- FILTER ---
 filtered = df.copy()
-
 if position != "All":
     filtered = filtered[filtered["position_name"] == position]
-
 filtered = filtered[filtered["price_m"] <= max_price]
-
 if form_filter:
     filtered = filtered[filtered["form_tier"].isin(form_filter)]
-
 if value_only:
-    filtered = filtered[filtered["is_value_pick"] == True]
-
+    filtered = filtered[filtered["is_value_pick"] == "true"]
 filtered = filtered.head(top_n)
 
-# --- METRICS ROW ---
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Players shown", len(filtered))
-col2.metric("Avg FPL score", f"{filtered['fpl_score'].mean():.2f}" if len(filtered) > 0 else "—")
-col3.metric("Avg price", f"£{filtered['price_m'].mean():.1f}m" if len(filtered) > 0 else "—")
-col4.metric("Value picks", filtered["is_value_pick"].sum())
+# --- METRICS ---
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Players shown", len(filtered))
+c2.metric("Avg FPL score", f"{filtered['fpl_score'].mean():.2f}" if len(filtered) > 0 else "—")
+c3.metric("Avg price", f"£{filtered['price_m'].mean():.1f}m" if len(filtered) > 0 else "—")
+c4.metric("Value picks", (filtered["is_value_pick"] == "true").sum())
 
 st.divider()
 
-# --- MAIN TABLE ---
+# --- TABLE ---
 if len(filtered) == 0:
-    st.warning("No players match your filters. Try adjusting them.")
+    st.warning("No players match your filters.")
 else:
-    # Rename fixture columns to actual GW numbers
     display_df = filtered[[
         "position_name", "player_name", "plays_for", "price_m",
         "fpl_form", "form_tier", "fpl_score",
@@ -134,28 +145,27 @@ else:
         "total_points", "goals_scored", "assists",
         "clean_sheets", "selected_by_percent"
     ]].rename(columns={
-        "position_name":     "Pos",
-        "player_name":       "Player",
-        "plays_for":         "Team",
-        "price_m":           "Price",
-        "fpl_form":          "Form",
-        "form_tier":         "Tier",
-        "fpl_score":         "FPL Score",
-        "fixture_gw1":       f"GW{gw1}",
-        "fixture_gw2":       f"GW{gw2}",
-        "fixture_gw3":       f"GW{gw3}",
-        "fixture_gw4":       f"GW{gw4}",
-        "fixture_gw5":       f"GW{gw5}",
+        "position_name": "Pos",
+        "player_name": "Player",
+        "plays_for": "Team",
+        "price_m": "Price",
+        "fpl_form": "Form",
+        "form_tier": "Tier",
+        "fpl_score": "FPL Score",
+        "fixture_gw1": f"GW{gw1}",
+        "fixture_gw2": f"GW{gw2}",
+        "fixture_gw3": f"GW{gw3}",
+        "fixture_gw4": f"GW{gw4}",
+        "fixture_gw5": f"GW{gw5}",
         "availability_status": "Status",
-        "is_value_pick":     "Value?",
-        "total_points":      "Pts",
-        "goals_scored":      "G",
-        "assists":           "A",
-        "clean_sheets":      "CS",
+        "is_value_pick": "Value?",
+        "total_points": "Pts",
+        "goals_scored": "G",
+        "assists": "A",
+        "clean_sheets": "CS",
         "selected_by_percent": "Ownership%"
     })
 
-    # Color the FPL score column
     st.dataframe(
         display_df.style.background_gradient(
             subset=["FPL Score"],
@@ -174,21 +184,17 @@ else:
     st.divider()
     st.subheader("Player detail")
     selected_player = st.selectbox(
-        "Select a player for more detail",
+        "Select a player",
         filtered["player_name"].tolist()
     )
+    row = filtered[filtered["player_name"] == selected_player].iloc[0]
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("FPL Score", f"{row['fpl_score']:.2f}")
+    d2.metric("Form", f"{row['fpl_form']:.1f}")
+    d3.metric("Price", f"£{row['price_m']:.1f}m")
+    d4.metric("Total pts", row['total_points'])
+    d5.metric("Ownership", f"{row['selected_by_percent']:.1f}%")
+    st.markdown(f"**Next 5 fixtures:** {row['fixture_gw1']} → {row['fixture_gw2']} → {row['fixture_gw3']} → {row['fixture_gw4']} → {row['fixture_gw5']}")
 
-    player_row = filtered[filtered["player_name"] == selected_player].iloc[0]
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("FPL Score",    f"{player_row['fpl_score']:.2f}")
-    c2.metric("Form",         f"{player_row['fpl_form']:.1f}")
-    c3.metric("Price",        f"£{player_row['price_m']:.1f}m")
-    c4.metric("Total points", player_row['total_points'])
-    c5.metric("Ownership",    f"{player_row['selected_by_percent']:.1f}%")
-
-    st.markdown(f"**Next 5 fixtures:** {player_row['fixture_gw1']} → {player_row['fixture_gw2']} → {player_row['fixture_gw3']} → {player_row['fixture_gw4']} → {player_row['fixture_gw5']}")
-
-# --- FOOTER ---
 st.divider()
-st.caption("Data source: FPL Official API · Transformed with dbt on Databricks · Built by Yashwanth Reddy")
+st.caption("Data: FPL Official API · Transformed with dbt on Databricks · Built by Yashwanth Reddy")
