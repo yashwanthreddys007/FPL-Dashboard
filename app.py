@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
 
 st.set_page_config(
     page_title="FPL Player Recommender",
@@ -9,37 +8,58 @@ st.set_page_config(
     layout="wide"
 )
 
+@st.cache_resource
+def get_oauth_token():
+    host = st.secrets["DATABRICKS_HOST"]
+    client_id = st.secrets["DATABRICKS_CLIENT_ID"]
+    client_secret = st.secrets["DATABRICKS_CLIENT_SECRET"]
+    
+    # Get OAuth token using M2M flow
+    token_url = f"https://{host}/oidc/v1/token"
+    response = requests.post(
+        token_url,
+        data={
+            "grant_type": "client_credentials",
+            "scope": "sql all-apis",
+            "client_id": client_id,
+            "client_secret": client_secret
+        }
+    )
+    
+    if response.status_code != 200:
+        st.error(f"OAuth error: {response.text}")
+        return None
+        
+    return response.json()["access_token"]
+
 @st.cache_data(ttl=3600)
 def load_recommendations():
     host = st.secrets["DATABRICKS_HOST"]
-    token = st.secrets["DATABRICKS_TOKEN"]
     http_path = st.secrets["DATABRICKS_HTTP_PATH"]
+    warehouse_id = http_path.split("/")[-1]
+    token = get_oauth_token()
     
-    # Use Databricks SQL Statement API (REST, always accessible)
+    if not token:
+        return pd.DataFrame()
+    
     url = f"https://{host}/api/2.0/sql/statements"
-    
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
     
-    # Get warehouse ID from http_path
-    warehouse_id = http_path.split("/")[-1]
-    
-    query = """
-        SELECT
-            position_name, position_rank, player_name, plays_for,
-            price_m, fpl_form, form_tier,
-            fixture_gw1, fixture_gw2, fixture_gw3, fixture_gw4, fixture_gw5,
-            gw1_num, fixture_score, availability_status, fpl_score,
-            is_value_pick, total_points, goals_scored, assists,
-            clean_sheets, selected_by_percent
-        FROM workspace.dbt_ysankepally_fpl_transformed.fpl_recommendations
-        ORDER BY fpl_score DESC
-    """
-    
     payload = {
-        "statement": query,
+        "statement": """
+            SELECT
+                position_name, position_rank, player_name, plays_for,
+                price_m, fpl_form, form_tier,
+                fixture_gw1, fixture_gw2, fixture_gw3, fixture_gw4, fixture_gw5,
+                gw1_num, fixture_score, availability_status, fpl_score,
+                is_value_pick, total_points, goals_scored, assists,
+                clean_sheets, selected_by_percent
+            FROM workspace.dbt_ysankepally_fpl_transformed.fpl_recommendations
+            ORDER BY fpl_score DESC
+        """,
         "warehouse_id": warehouse_id,
         "catalog": "workspace",
         "schema": "dbt_ysankepally_fpl_transformed",
@@ -51,12 +71,12 @@ def load_recommendations():
     response = requests.post(url, headers=headers, json=payload)
     
     if response.status_code != 200:
-        st.error(f"API error: {response.status_code} — {response.text}")
+        st.error(f"Query error: {response.status_code} — {response.text}")
         return pd.DataFrame()
     
     result = response.json()
     
-    # Handle async — poll if still running
+    # Poll if still running
     import time
     while result.get("status", {}).get("state") in ["PENDING", "RUNNING"]:
         time.sleep(2)
@@ -69,15 +89,15 @@ def load_recommendations():
         st.error(f"Query failed: {result}")
         return pd.DataFrame()
     
-    # Parse results
     columns = [col["name"] for col in result["manifest"]["schema"]["columns"]]
     rows = result["result"]["data_array"]
     df = pd.DataFrame(rows, columns=columns)
     
-    # Fix types
-    numeric_cols = ["price_m", "fpl_form", "fpl_score", "fixture_score",
-                    "total_points", "goals_scored", "assists", "clean_sheets",
-                    "selected_by_percent", "gw1_num", "position_rank"]
+    numeric_cols = [
+        "price_m", "fpl_form", "fpl_score", "fixture_score",
+        "total_points", "goals_scored", "assists", "clean_sheets",
+        "selected_by_percent", "gw1_num", "position_rank"
+    ]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -88,19 +108,18 @@ def load_recommendations():
 st.title("⚽ FPL Player Recommender")
 st.markdown("Fantasy Premier League transfer recommendations based on form, fixtures and availability.")
 
-# --- LOAD DATA ---
+# --- LOAD ---
 with st.spinner("Loading FPL data from Databricks..."):
     df = load_recommendations()
 
 if df.empty:
-    st.error("Could not load data. Check logs for details.")
+    st.error("Could not load data.")
     st.stop()
 
-# Get GW numbers
 gw1 = int(df["gw1_num"].dropna().iloc[0]) if not df["gw1_num"].dropna().empty else 30
 gw2, gw3, gw4, gw5 = gw1+1, gw1+2, gw1+3, gw1+4
 
-# --- SIDEBAR FILTERS ---
+# --- SIDEBAR ---
 st.sidebar.header("Filters")
 position = st.sidebar.selectbox("Position", ["All", "GKP", "DEF", "MID", "FWD"])
 max_price = st.sidebar.slider("Max price (£m)", 4.0, 15.0, 10.0, 0.5)
@@ -121,7 +140,7 @@ if form_filter:
     filtered = filtered[filtered["form_tier"].isin(form_filter)]
 if value_only:
     filtered = filtered[filtered["is_value_pick"] == "true"]
-filtered = filtered.head(top_n)
+filtered = filtered.sort_values("fpl_score", ascending=False).head(top_n)
 
 # --- METRICS ---
 c1, c2, c3, c4 = st.columns(4)
@@ -180,21 +199,18 @@ else:
         height=500
     )
 
-    # --- PLAYER DETAIL ---
     st.divider()
     st.subheader("Player detail")
-    selected_player = st.selectbox(
-        "Select a player",
-        filtered["player_name"].tolist()
-    )
+    selected_player = st.selectbox("Select a player", filtered["player_name"].tolist())
     row = filtered[filtered["player_name"] == selected_player].iloc[0]
+
     d1, d2, d3, d4, d5 = st.columns(5)
     d1.metric("FPL Score", f"{row['fpl_score']:.2f}")
     d2.metric("Form", f"{row['fpl_form']:.1f}")
     d3.metric("Price", f"£{row['price_m']:.1f}m")
-    d4.metric("Total pts", row['total_points'])
+    d4.metric("Total pts", int(row["total_points"]))
     d5.metric("Ownership", f"{row['selected_by_percent']:.1f}%")
     st.markdown(f"**Next 5 fixtures:** {row['fixture_gw1']} → {row['fixture_gw2']} → {row['fixture_gw3']} → {row['fixture_gw4']} → {row['fixture_gw5']}")
 
 st.divider()
-st.caption("Data: FPL Official API · Transformed with dbt on Databricks · Built by Yashwanth Reddy")
+st.caption("Data: FPL Official API · Pipeline: PySpark + Databricks + dbt · Built by Yashwanth Reddy")
