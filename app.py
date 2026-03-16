@@ -137,7 +137,9 @@ if position != "All":
     filtered = filtered[filtered["position_name"] == position]
 filtered = filtered[filtered["price_m"] <= max_price]
 if form_filter:
-    filtered = filtered[filtered["form_tier"].isin(form_filter)]
+    filtered = filtered[
+    (filtered["form_tier"].isin(form_filter)) | (filtered["form_tier"].isna())
+]
 if value_only:
     filtered = filtered[filtered["is_value_pick"] == "true"]
 filtered = filtered.sort_values("fpl_score", ascending=False).head(top_n)
