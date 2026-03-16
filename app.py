@@ -129,7 +129,7 @@ form_filter = st.sidebar.multiselect(
     default=["elite", "good"]
 )
 value_only = st.sidebar.checkbox("Value picks only", value=False)
-top_n = st.sidebar.slider("Show top N players", 5, 50, 15)
+top_n = st.sidebar.slider("Show top N players", 10, 600, 15)
 
 # --- FILTER ---
 filtered = df.copy()
