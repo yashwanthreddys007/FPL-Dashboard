@@ -197,18 +197,18 @@ st.dataframe(
     height=500
 )
 
-    st.divider()
-    st.subheader("Player detail")
-    selected_player = st.selectbox("Select a player", filtered["player_name"].tolist())
-    row = filtered[filtered["player_name"] == selected_player].iloc[0]
+st.divider()
+st.subheader("Player detail")
+selected_player = st.selectbox("Select a player", filtered["player_name"].tolist())
+row = filtered[filtered["player_name"] == selected_player].iloc[0]
 
-    d1, d2, d3, d4, d5 = st.columns(5)
-    d1.metric("FPL Score", f"{row['fpl_score']:.2f}")
-    d2.metric("Form", f"{row['fpl_form']:.1f}")
-    d3.metric("Price", f"£{row['price_m']:.1f}m")
-    d4.metric("Total pts", int(row["total_points"]))
-    d5.metric("Ownership", f"{row['selected_by_percent']:.1f}%")
-    st.markdown(f"**Next 5 fixtures:** {row['fixture_gw1']} → {row['fixture_gw2']} → {row['fixture_gw3']} → {row['fixture_gw4']} → {row['fixture_gw5']}")
+d1, d2, d3, d4, d5 = st.columns(5)
+d1.metric("FPL Score", f"{row['fpl_score']:.2f}")
+d2.metric("Form", f"{row['fpl_form']:.1f}")
+d3.metric("Price", f"£{row['price_m']:.1f}m")
+d4.metric("Total pts", int(row["total_points"]))
+d5.metric("Ownership", f"{row['selected_by_percent']:.1f}%")
+st.markdown(f"**Next 5 fixtures:** {row['fixture_gw1']} → {row['fixture_gw2']} → {row['fixture_gw3']} → {row['fixture_gw4']} → {row['fixture_gw5']}")
 
 st.divider()
 st.caption("Data: FPL Official API · Pipeline: PySpark + Databricks + dbt · Built by Yashwanth Reddy")
