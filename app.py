@@ -185,19 +185,17 @@ else:
         "selected_by_percent": "Ownership%"
     })
 
-    st.dataframe(
-        display_df.style.background_gradient(
-            subset=["FPL Score"],
-            cmap="RdYlGn"
-        ).format({
-            "Price": "£{:.1f}m",
-            "Form": "{:.1f}",
-            "FPL Score": "{:.2f}",
-            "Ownership%": "{:.1f}%"
-        }),
-        use_container_width=True,
-        height=500
-    )
+    # Format columns
+display_df["Price"] = display_df["Price"].map(lambda x: f"£{x:.1f}m")
+display_df["Form"] = display_df["Form"].map(lambda x: f"{x:.1f}")
+display_df["FPL Score"] = display_df["FPL Score"].map(lambda x: f"{x:.2f}")
+display_df["Ownership%"] = display_df["Ownership%"].map(lambda x: f"{x:.1f}%")
+
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    height=500
+)
 
     st.divider()
     st.subheader("Player detail")
