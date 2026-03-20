@@ -34,6 +34,20 @@ def get_oauth_token():
 
 
 @st.cache_data(ttl=3600)
+def get_current_gw():
+    try:
+        r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/")
+        events = r.json()["events"]
+        current = next((e for e in events if e["is_current"]), None)
+        if current:
+            return current["id"]
+        next_gw = next((e for e in events if e["is_next"]), None)
+        return next_gw["id"] if next_gw else "current"
+    except:
+        return "current"
+
+
+@st.cache_data(ttl=3600)
 def load_recommendations():
     host = st.secrets["DATABRICKS_HOST"]
     http_path = st.secrets["DATABRICKS_HTTP_PATH"]
@@ -41,117 +55,4 @@ def load_recommendations():
     token = get_oauth_token()
 
     if not token:
-        return pd.DataFrame()
-
-    url = f"https://{host}/api/2.0/sql/statements"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "statement": """
-            SELECT
-                position_name,
-                position_rank,
-                player_name,
-                plays_for,
-                price_m,
-                fpl_form,
-                form_tier,
-                next_5_fixtures,
-                gw1_num,
-                fixture_score,
-                availability_status,
-                fpl_score,
-                is_value_pick,
-                total_points,
-                goals_scored,
-                assists,
-                clean_sheets,
-                selected_by_percent
-            FROM workspace.dbt_ysankepally_fpl_transformed.fpl_recommendations
-            ORDER BY fpl_score DESC
-        """,
-        "warehouse_id": warehouse_id,
-        "catalog": "workspace",
-        "schema": "dbt_ysankepally_fpl_transformed",
-        "wait_timeout": "30s",
-        "disposition": "INLINE",
-        "format": "JSON_ARRAY"
-    }
-
-    response = requests.post(url, headers=headers, json=payload)
-
-    if response.status_code != 200:
-        st.error(f"Query error: {response.status_code} — {response.text}")
-        return pd.DataFrame()
-
-    result = response.json()
-
-    while result.get("status", {}).get("state") in ["PENDING", "RUNNING"]:
-        time.sleep(2)
-        statement_id = result["statement_id"]
-        poll_url = f"https://{host}/api/2.0/sql/statements/{statement_id}"
-        response = requests.get(poll_url, headers=headers)
-        result = response.json()
-
-    if result.get("status", {}).get("state") != "SUCCEEDED":
-        st.error(f"Query failed: {result}")
-        return pd.DataFrame()
-
-    columns = [col["name"] for col in result["manifest"]["schema"]["columns"]]
-    rows = result["result"]["data_array"]
-    df = pd.DataFrame(rows, columns=columns)
-
-    numeric_cols = [
-        "price_m", "fpl_form", "fpl_score", "fixture_score",
-        "total_points", "goals_scored", "assists", "clean_sheets",
-        "selected_by_percent", "gw1_num", "position_rank"
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df
-
-
-# --- HEADER ---
-st.title("⚽ FPL Player Recommender")
-st.markdown("Fantasy Premier League transfer recommendations based on form, fixtures and availability.")
-
-# --- LOAD DATA ---
-with st.spinner("Loading FPL data from Databricks..."):
-    df = load_recommendations()
-
-if df.empty:
-    st.error("Could not load data.")
-    st.stop()
-
-# --- DYNAMIC CURRENT GW ---
-current_gw = int(df["gw1_num"].dropna().iloc[0]) if not df["gw1_num"].dropna().empty else "current"
-st.info(f"Showing recommendations from **GW{current_gw}** onwards — updated every hour.")
-
-# --- SIDEBAR FILTERS ---
-st.sidebar.header("Filters")
-
-position = st.sidebar.selectbox(
-    "Position",
-    ["All", "GKP", "DEF", "MID", "FWD"]
-)
-
-max_price = st.sidebar.slider(
-    "Max price (£m)",
-    min_value=4.0,
-    max_value=15.0,
-    value=10.0,
-    step=0.5
-)
-
-form_filter = st.sidebar.multiselect(
-    "Form tier",
-    ["elite", "good", "average", "poor"],
-    default=["elite", "good"]
-)
-
-value_only = st.sidebar.checkbox("Value picks only", value=False)
+        return pd.DataFr
