@@ -67,7 +67,7 @@ def load_recommendations():
         "statement": """
             SELECT
                 position_name,
-                position_rank,
+                position_rk,
                 player_name,
                 plays_for,
                 price_m,
