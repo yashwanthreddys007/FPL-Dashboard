@@ -271,6 +271,6 @@ else:
     col2.metric("Assists",      int(row["assists"]))
     col3.metric("Clean sheets", int(row["clean_sheets"]))
 
-# --- FOOTER ---
+
 st.divider()
 st.caption("Data: FPL Official API · Pipeline: PySpark + Databricks + dbt · Built by Yashwanth Reddy")
